@@ -1,34 +1,36 @@
-name: CF Clearance Scraper
+name: CF Key Generator
 on:
   workflow_dispatch:
 
 jobs:
-  scrape:
+  build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Install Dependencies
+      - name: Install Libraries
         run: pip install nodriver curl_cffi
 
-      - name: Install Chrome and Xvfb
+      - name: Install Chrome & Display Server
         run: |
           sudo apt-get update
           sudo apt-get install -y google-chrome-stable xvfb
 
       - name: Run Scraper
-        # This command fixes the "Failed to connect to browser" error
+        # This command is the absolute requirement for running nodriver on a server
         run: xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python main.py
 
       - name: Upload Result
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: result
+          name: scraper-results
           path: |
             result.json
-            debug_page.html
+            debug.html
