@@ -1,19 +1,17 @@
 import asyncio
 import re
 import json
-import os
 import nodriver as uc
 from curl_cffi import requests
 
-# Configuration
+# 1. Configuration
 WP_API_URL = "https://serialmaza.xyz/wp-json/wp/v2/posts"
 OUTPUT_FILE = "result.json"
 
 def get_extract_id():
-    """Extracts the 32-char ID from the WordPress API."""
+    """Fetches the 32-character ID from the WordPress API."""
     print(f"[*] Fetching target ID from: {WP_API_URL}")
     try:
-        # Use impersonate to bypass potential WAF on the API itself
         response = requests.get(WP_API_URL, impersonate="chrome124", timeout=15)
         response.raise_for_status()
         posts = response.json()
@@ -27,63 +25,55 @@ def get_extract_id():
         print(f"[-] API Error: {e}")
     return None
 
-async def solve_turnstile(page):
-    """Detects and clicks the Turnstile checkbox."""
-    print("[*] Looking for Turnstile challenge...")
-    try:
-        # Wait for the Cloudflare iframe
-        iframe = await page.select('iframe[src*="challenges.cloudflare.com"]', timeout=15)
-        if iframe:
-            print("[!] Turnstile detected. Performing human-like click...")
-            # Get coordinates of the iframe to click the checkbox area
-            rect = await iframe.get_position()
-            # The checkbox is usually in the top-left quadrant of the widget
-            await page.mouse.move(rect.x + 45, rect.y + 45)
-            await asyncio.sleep(0.5)
-            await page.mouse.click()
-            print("[+] Clicked. Waiting for verification...")
-            return True
-    except Exception:
-        print("[*] No interactive challenge found; might have auto-solved.")
-    return False
-
 async def main():
     target_id = get_extract_id()
     if not target_id:
+        print("[-] Error: No ID found. Exiting.")
         return
 
-    print("[*] Launching browser with Root-Bypass settings...")
+    print("[*] Launching browser with explicit uc.Config (Root Bypass)...")
+
+    # --- THE CRITICAL FIX ---
+    config = uc.Config()
+    config.no_sandbox = True  # Solves the "Failed to connect/root" error
+    config.headless = False   # False is better for Turnstile (xvfb handles the display)
     
-    # THE 100% WORKING CONFIG:
-    # We use headless=False + no_sandbox=True to satisfy the root user requirement.
-    # xvfb-run (in the YAML) will handle the display.
-    browser = await uc.start(
-        headless=False, 
-        no_sandbox=True,
-        browser_args=[
-            "--no-sandbox",
-            "--disable-setuid-sandbox",
-            "--disable-dev-shm-usage",
-            "--remote-debugging-port=9222",
-            "--disable-gpu",
-            "--no-first-run"
-        ]
-    )
+    # Standard stability arguments
+    config.add_argument("--disable-setuid-sandbox")
+    config.add_argument("--disable-dev-shm-usage")
+    config.add_argument("--disable-gpu")
+    config.add_argument("--no-first-run")
+    config.add_argument("--window-size=1920,1080")
+
+    browser = await uc.start(config)
 
     try:
         url = f"https://multiup.io/en/mirror/{target_id}"
+        print(f"[*] Navigating to: {url}")
         page = await browser.get(url)
         
-        # 1. Wait for Turnstile to appear and solve it
-        await asyncio.sleep(7) 
-        await solve_turnstile(page)
+        # Wait for the page and Turnstile widget to initialize
+        await asyncio.sleep(10)
 
-        # 2. Extract Cookie
-        print("[*] Monitoring cookies for cf_clearance...")
+        # Handle the Turnstile checkbox
+        try:
+            # Look for the Cloudflare challenge iframe
+            iframe = await page.select('iframe[src*="challenges.cloudflare.com"]', timeout=10)
+            if iframe:
+                print("[!] Turnstile detected. Clicking the checkbox area...")
+                # Coordinate-based click often works better in headless-virtual environments
+                rect = await iframe.get_position()
+                await page.mouse.move(rect.x + 35, rect.y + 35)
+                await page.mouse.click()
+                await asyncio.sleep(5)
+        except Exception:
+            print("[*] No interactive challenge detected; checking for cookies.")
+
+        print("[*] Monitoring for cf_clearance cookie...")
         cf_clearance = None
         user_agent = None
 
-        for _ in range(20): # Try for 40 seconds
+        for _ in range(20): # Check for 40 seconds total
             cookies = await browser.cookies.get_all()
             for c in cookies:
                 if c.name == "cf_clearance":
@@ -94,20 +84,26 @@ async def main():
                 break
             await asyncio.sleep(2)
 
-        # 3. Save Result
         if cf_clearance:
-            res = {"cf_clearance": cf_clearance, "user_agent": user_agent, "id": target_id}
+            result = {
+                "cf_clearance": cf_clearance,
+                "user_agent": user_agent,
+                "target_id": target_id
+            }
             with open(OUTPUT_FILE, "w") as f:
-                json.dump(res, f, indent=4)
+                json.dump(result, f, indent=4)
             print(f"[SUCCESS] Key Captured: {cf_clearance[:20]}...")
         else:
-            print("[-] Failed to capture cookie. Saving debug HTML.")
+            print("[-] FAILED: Cookie not found. Saving debug page.")
             html = await page.get_content()
-            with open("debug.html", "w") as f:
+            with open("debug_page.html", "w") as f:
                 f.write(html)
 
+    except Exception as e:
+        print(f"[-] Browser Execution Error: {e}")
     finally:
-        await browser.stop()
+        if browser:
+            await browser.stop()
 
 if __name__ == "__main__":
     asyncio.run(main())
